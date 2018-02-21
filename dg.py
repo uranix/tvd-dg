@@ -11,14 +11,14 @@ class Dg(object):
     p    -- polynomial degree
     prob -- an instance of Problem to solve
     """
-    def __init__(self, n, p, prob, C=0.5, use_limiter=False):
+    def __init__(self, n, p, prob, C=0.5, method='tvd'):
         # Store parameters
         self.prob = prob
         self.n = n
         self.p = p
         self.h = prob.L() / n
         self.C = C
-        self.use_limiter = use_limiter
+        self.method = method
 
         self.mat = Matrices(p)
 
@@ -46,7 +46,7 @@ class Dg(object):
 
         t = 0
         stepnum = 0
-        self.save(stepnum, u)
+        self.save_csv(stepnum, u)
         while t < prob.T():
             amax = 0
             for i in range(n):
@@ -62,7 +62,7 @@ class Dg(object):
 
             if (stepnum % 5 == 0):
                 print("t = %8.4f" % t)
-                self.save(stepnum, u)
+                self.save_csv(stepnum, u)
 
     """
     Perform a single timestep using a third order
@@ -88,22 +88,11 @@ class Dg(object):
         L = self.mat.get_interpolate_vector(s)
         return L @ u[i, :, :]
 
-    """
-    Evaluate total variation for a scalar-valued function
-    """
-    def TV(self, u):
-        return np.sum(np.abs(np.diff(u)))
-
-    """
-    Evaluate the right hand side for the DG ODE
-    """
-    def A(self, u, t, dt):
+    def flux_HO(self, u):
         n = self.n
         p = self.p
         prob = self.prob
         params = self.params
-
-        Au = np.empty_like(u)
 
         FL = np.empty((n, u.shape[2]))
         FR = np.empty((n, u.shape[2]))
@@ -125,65 +114,157 @@ class Dg(object):
             if i < n:
                 FL[i]   = FLv
 
-        omega = np.empty((n, u.shape[2], u.shape[2]))
-        inv_omega = np.empty_like(omega)
-        S = np.empty_like(u)
-        for i in range(n):
-            Uiavg = self.mat.weight @ u[i, :]
-            omega[i] = prob.Omega(Uiavg, params[i])
-            inv_omega[i] = np.linalg.inv(omega[i])
-            for j in range(p+1):
-                S[i, j] = omega[i] @ u[i, j]
-
         Fui = np.empty((p+3, u.shape[2]))
+        FHO = np.empty((n, p+2, u.shape[2]))
+        Ki = self.mat.get_Ki()
 
         for i in range(n):
             for j in range(p+1):
                 Fui[j + 1] = prob.F(u[i, j], params[i])
             Fui[0], Fui[p+2] = FL[i], FR[i]
 
-            Ki = self.mat.get_Ki()
             KF = Ki @ Fui
 
+            FHO[i, 0] = Fui[0]
+            for j in range(0, p+1):
+                FHO[i, j+1] = FHO[i, j] - KF[j]
+
+        return FHO
+
+    def flux_LO(self, u):
+        n = self.n
+        p = self.p
+        prob = self.prob
+        params = self.params
+
+        FL = np.empty((n, u.shape[2]))
+        FR = np.empty((n, u.shape[2]))
+
+        for i in range(n+1):
+            uL = u[i-1, p] if i > 0 else None
+            uR = u[i, 0]   if i < n else None
+            pL = params[i-1] if i > 0 else None
+            pR = params[i]   if i < n else None
+            bct = Problem.INNER
+            if i == 0:
+                bct = Problem.LEFTBC
+            if i == n:
+                bct = Problem.RIGHTBC
+
+            FRv, FLv = prob.R(uL, uR, pL, pR, bct)
+            if i > 0:
+                FR[i-1] = FRv
+            if i < n:
+                FL[i]   = FLv
+
+        FLO = np.empty((n, p+2, u.shape[2]))
+
+        for i in range(n):
+            FLO[i, 0] = FL[i]
+            FLO[i, p+1] = FR[i]
+
+            pp = params[i]
+
+            for j in range(1, p+1):
+                FLO[i, j], _ = prob.R(u[i, j-1], u[i, j], pp, pp, Problem.INNER)
+
+        return FLO
+
+    """
+    Evaluate the right hand side for the DG ODE
+    """
+    def A(self, u, t, dt):
+        n = self.n
+        p = self.p
+        prob = self.prob
+        params = self.params
+        method = self.method
+
+        if method == 'tvd' or method == 'ho':
+            FHO = self.flux_HO(u)
+        if method == 'tvd' or method == 'lo':
+            FLO = self.flux_LO(u)
+
+        if method == 'lo':
+            FLUX = FLO
+
+        if method == 'ho':
+            FLUX = FHO
+
+        if method == 'tvd':
+            delta = np.zeros_like(FHO)
+            omega = np.zeros((n, p+2, delta.shape[2], delta.shape[2]))
+            invomega = np.zeros((n, p+2, delta.shape[2], delta.shape[2]))
+            lamb = np.zeros_like(delta)
+
+            for i in range(n):
+                for j in range(1, p+1):
+                    uavg = 0.5 * (u[i, j, :] + u[i, j-1, :])
+                    omega[i, j, :, :]    = prob.Omega(uavg, params[i])
+                    invomega[i, j, :, :] = prob.invOmega(uavg, params[i])
+                    lamb[i, j, :]        = prob.lamb(uavg, params[i])
+                    delta[i, j, :] = omega[i, j, :, :] @ (u[i, j, :] - u[i, j-1, :])
+                if i > 0:
+                    uavg = 0.5 * (u[i, 0, :] + u[i-1, p, :])
+                    omega[i, 0, :, :]    = prob.Omega(uavg, params[i])
+                    invomega[i, 0, :, :] = prob.invOmega(uavg, params[i])
+                    lamb[i, 0, :]        = prob.lamb(uavg, params[i])
+                    delta[i, 0, :] = omega[i, 0, :, :] @ (u[i, 0, :] - u[i-1, p, :])
+                if i < n-1:
+                    uavg = 0.5 * (u[i+1, 0, :] + u[i, p, :])
+                    omega[i, p+1, :, :]    = prob.Omega(uavg, params[i])
+                    invomega[i, p+1, :, :] = prob.invOmega(uavg, params[i])
+                    lamb[i, p+1, :]        = prob.lamb(uavg, params[i])
+                    delta[i, p+1, :] = omega[i, p+1, :, :] @ (u[i+1, 0, :] - u[i, p, :])
+
+            ideal = np.zeros_like(FHO)
+            for i in range(n):
+                for j in range(p+2):
+                    ideal[i, j] = omega[i, j, :, :] @ (FHO[i, j, :] - FLO[i, j, :])
+
+            delta = delta.reshape(n * (p+2), -1)
+            ideal = ideal.reshape(n * (p+2), -1)
+            lamb  = lamb.reshape(n * (p+2), -1)
+
+            def minmod(x, y):
+                sx = np.sign(x)
+                sy = np.sign(y)
+                return 0.5 * (sx + sy) * np.minimum(abs(x), abs(y))
+
+            for ij in range(1, n * (p+2) - 1):
+                lamplus = lamb[ij, :]
+                lamminus = lamplus.copy()
+                lamplus[lamplus < 0] = 0
+                lamminus[lamminus > 0] = 0
+                sleft  = minmod(delta[ij], delta[ij-1])
+                sright = minmod(delta[ij], delta[ij+1])
+                val = np.diag(lamplus) @ sleft - np.diag(lamminus) @ sright
+                ideal[ij] = minmod(ideal[ij], val)
+
+            ideal = ideal.reshape(n, p+2, -1)
+
+            FLUX = np.zeros_like(FHO)
+
+            for i in range(n):
+                for j in range(p+2):
+                    FLUX[i, j] = FLO[i, j] + invomega[i, j, :, :] @ ideal[i, j]
+
+        Au = np.empty_like(u)
+
+        for i in range(n):
             for l in range(p+1):
-                Au[i, l] = KF[l] * 2 / (self.h * self.mat.weight[l])
-
-        if not self.use_limiter:
-            return Au
-
-        unew = u + dt * Au
-        Snew = np.empty_like(unew)
-        for i in range(n):
-            for j in range(p+1):
-                Snew[i, j] = omega[i] @ unew[i, j]
-
-        deltaS = np.empty_like(Snew)
-
-        for k in range(u.shape[2]):
-            # Treat each invariant separately
-            s    = S   [:, :, k].flatten()
-            snew = Snew[:, :, k].flatten()
-
-            TVold = self.TV(s)
-            TVnew = self.TV(snew)
-            print(TVold, TVnew)
-
-        deltaS[:, :, :] = 0
-
-        for i in range(n):
-            for j in range(p+1):
-                Au[i, j] += inv_omega[i] @ deltaS[i, j]
+                Au[i, l] = (FLUX[i, l] - FLUX[i, l+1]) * 2 / (self.h * self.mat.weight[l])
 
         return Au
 
     """
     Save current solution to CSV file
     """
-    def save(self, stepnum, u):
+    def save_csv(self, stepnum, u):
         n = self.n
         filename = '_'.join([
                 type(self.prob).__name__,
-                ('tvd' if self.use_limiter else 'notvd'),
+                self.method,
                 str(stepnum) + '.csv'
             ])
         with open('csv/' + filename, 'w') as csv:
@@ -192,9 +273,44 @@ class Dg(object):
                 csv.write(',u%d' % j)
             csv.write('\n')
             for i in range(n):
+                for j in range(u.shape[1]):
+                    ui = u[i, j]
+                    s = self.mat.s[j]
+                    csv.write('%e' % ((i + 0.5*s + 0.5)*self.h))
+                    for uiv in ui:
+                        csv.write(',%e' % uiv)
+                    csv.write('\n')
+                """
                 for s in np.linspace(-1, 1, 21):
                     ui = self.interp(u, i, s);
                     csv.write('%e' % ((i + 0.5*s + 0.5)*self.h))
                     for uiv in ui:
                         csv.write(',%e' % uiv)
                     csv.write('\n')
+                """
+
+    """
+    Save current solution to DAT file
+    """
+    def save_dat(self, stepnum, u):
+        n = self.n
+        filename = '_'.join([
+                type(self.prob).__name__,
+                self.method,
+                str(stepnum) + '.dat'
+            ])
+
+        logrid = [-1]
+        for w in self.mat.weight:
+            logrid.append(logrid[-1] + w)
+
+        with open('csv/' + filename, 'w') as csv:
+            csv.write('\n')
+            for i in range(n):
+                for s in np.linspace(-1, 1, 21):
+                    ui = self.interp(u, i, s);
+                    csv.write('%e' % ((i + 0.5*s + 0.5)*self.h))
+                    for uiv in ui:
+                        csv.write(' %e' % uiv)
+                    csv.write('\n')
+                csv.write('\n')

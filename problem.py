@@ -49,6 +49,20 @@ class Problem(object):
         raise NotImplementedError
 
     """
+    Returns the inverse of the left eigevectors matrix
+    """
+    @staticmethod
+    def invOmega(u, p):
+        raise NotImplementedError
+
+    """
+    Returns the eigenvalues as a vector
+    """
+    @staticmethod
+    def lamb(u, p):
+        raise NotImplementedError
+
+    """
     Returns the fastest travelling wave speed
     """
     @staticmethod

@@ -22,12 +22,16 @@ class Wave(Problem):
         return math.sqrt(p.mu * p.rho)
 
     @staticmethod
+    def c(p):
+        return math.sqrt(p.mu / p.rho)
+
+    @staticmethod
     def F(u, p):
         return [-u[1] / p.rho, -u[0] * p.mu]
 
     @staticmethod
     def T():
-        return 0.4
+        return 1.5
 
     @staticmethod
     def L():
@@ -39,8 +43,18 @@ class Wave(Problem):
         return [[a, 1], [-a, 1]]
 
     @staticmethod
+    def invOmega(u, p):
+        a = Wave.a(p)
+        return [[0.5/a, -0.5/a], [0.5, 0.5]]
+
+    @staticmethod
+    def lamb(u, p):
+        c = Wave.c(p)
+        return [-c, c]
+
+    @staticmethod
     def aMax(u, p):
-        return math.sqrt(p.mu / p.rho)
+        return Wave.c(p)
 
     @staticmethod
     def R(uL, uR, pL, pR, bctype):

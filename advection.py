@@ -34,6 +34,14 @@ class Advection(Problem):
         return np.eye(1)
 
     @staticmethod
+    def invOmega(u, p):
+        return np.eye(1)
+
+    @staticmethod
+    def lamb(u, p):
+        return [Advection.c(p)]
+
+    @staticmethod
     def aMax(u, p):
         return Advection.c(p)
 
